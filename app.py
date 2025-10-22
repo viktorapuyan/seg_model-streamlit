@@ -26,7 +26,7 @@ H5_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'unet_best (1).h5'
 TFLITE_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tflite_model.tflite')
 IMAGE_SIZE = (512, 512)  # change if your model expects different
 
-st.set_page_config(page_title="UNet Segmentation Demo", layout="centered")
+st.set_page_config(page_title="Product Measurement Demo", layout="centered")
 
 st.title("UNet Product Segmentation")
 st.write("Upload a photo of a product (mug, Funko Pop, perfume) and run segmentation.")
