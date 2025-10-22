@@ -162,22 +162,61 @@ uploaded = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 def preprocess(img: Image, target_size):
     img = img.convert('RGB')
     orig_w, orig_h = img.size
-    # resize keeping aspect ratio with padding
+    # resize to model input size (no padding here for simplicity)
     img_resized = img.resize(target_size, Image.BILINEAR)
-    arr = np.array(img_resized) / 255.0
-    return arr.astype(np.float32), (orig_w, orig_h)
+    # return image in 0-255 as in your notebook pipeline
+    arr = np.array(img_resized).astype(np.float32)
+    return arr, (orig_w, orig_h)
+
+
+def read_image_mask_from_pil(pil_img, mask=False, size=IMAGE_SIZE):
+    """Mimic the notebook's read_image_mask: return numpy arrays.
+    If mask True, returns binary mask (0/1) of shape HxW or HxW x1.
+    """
+    if mask:
+        img = pil_img.convert('L').resize(size, Image.NEAREST)
+        arr = np.array(img)
+        # threshold to binary
+        arr = (arr > 127).astype(np.uint8)
+        return arr
+    else:
+        img = pil_img.convert('RGB').resize(size, Image.BILINEAR)
+        arr = np.array(img).astype(np.float32)
+        return arr
+
+
+def preprocess_image(path):
+    # path can be a PIL Image or a path-like; accept PIL Image for uploaded content
+    if isinstance(path, Image.Image):
+        img = read_image_mask_from_pil(path, mask=False)
+    else:
+        img_pil = Image.open(path).convert('RGB')
+        img = read_image_mask_from_pil(img_pil, mask=False)
+    # keep 0-255 as notebook did
+    return img
+
+
+def preprocess_mask(path):
+    if isinstance(path, Image.Image):
+        m = read_image_mask_from_pil(path, mask=True)
+    else:
+        m_pil = Image.open(path).convert('L')
+        m = read_image_mask_from_pil(m_pil, mask=True)
+    return m
 
 
 def run_keras_inference(model, image_arr):
     inp = np.expand_dims(image_arr, 0)
     pred = model.predict(inp)[0]
-    # assume single-channel sigmoid output
-    if pred.shape[-1] > 1:
-        mask = np.argmax(pred, axis=-1)
-        mask = (mask > 0).astype(np.uint8)
+    # handle multi-class softmax (channel 1 = foreground) or single-channel sigmoid
+    if pred.ndim == 3 and pred.shape[-1] > 1:
+        # use second channel as foreground probability
+        fg = pred[..., 1]
+        mask = (fg > 0.5).astype(np.uint8)
     else:
-        mask = pred[..., 0]
-        mask = (mask > 0.5).astype(np.uint8)
+        # single channel
+        prob = pred[..., 0] if pred.ndim == 3 else pred
+        mask = (prob > 0.5).astype(np.uint8)
     return mask
 
 
@@ -189,9 +228,11 @@ def run_tflite_inference(interp, input_details, output_details, image_arr):
     # handle quantized input
     if input_details[0].get('dtype') in (np.int8, np.uint8):
         scale, zero_point = input_details[0].get('quantization', (1.0, 0))
-        inp_q = (inp / scale + zero_point).astype(input_details[0]['dtype'])
+        # if model expects quantized input, assume original image_arr in 0-255 and convert
+        inp_q = ((inp) / scale + zero_point).astype(input_details[0]['dtype'])
         interp.set_tensor(input_index, inp_q)
     else:
+        # if model expects float input, set directly. Many TF models accept 0-255 inputs if trained that way.
         interp.set_tensor(input_index, inp.astype(input_details[0]['dtype']))
     interp.invoke()
     out = interp.get_tensor(output_details[0]['index'])
@@ -201,13 +242,16 @@ def run_tflite_inference(interp, input_details, output_details, image_arr):
         out = (out.astype(np.float32) - zero_point) * scale
     # out shape may be (1, H, W, C) or (1, H, W)
     pred = out[0]
+    # handle multi-channel softmax like Keras model (use channel 1 as foreground)
     if pred.ndim == 3 and pred.shape[-1] > 1:
-        mask = np.argmax(pred, axis=-1)
-        mask = (mask > 0).astype(np.uint8)
+        fg = pred[..., 1]
+        mask = (fg > 0.5).astype(np.uint8)
     else:
         if pred.ndim == 3:
-            pred = pred[..., 0]
-        mask = (pred > 0.5).astype(np.uint8)
+            prob = pred[..., 0]
+        else:
+            prob = pred
+        mask = (prob > 0.5).astype(np.uint8)
     return mask
 
 
