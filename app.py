@@ -23,7 +23,7 @@ except Exception:
 # Config
 # By default prefer a tflite model (same directory as H5). Update names as needed.
 H5_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'unet_best (1).h5')
-TFLITE_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tflite_model.tflite')
+TFLITE_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tflite_model_another.tflite')
 IMAGE_SIZE = (512, 512)  # change if your model expects different
 
 st.set_page_config(page_title="UNet Segmentation Demo", layout="centered")
