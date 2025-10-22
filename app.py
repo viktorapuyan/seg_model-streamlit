@@ -23,7 +23,7 @@ except Exception:
 # Config
 # By default prefer a tflite model (same directory as H5). Update names as needed.
 H5_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'unet_best (1).h5')
-TFLITE_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tflite_model_another.tflite')
+TFLITE_MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tflite_model.tflite')
 IMAGE_SIZE = (512, 512)  # change if your model expects different
 
 st.set_page_config(page_title="UNet Segmentation Demo", layout="centered")
@@ -31,11 +31,54 @@ st.set_page_config(page_title="UNet Segmentation Demo", layout="centered")
 st.title("UNet Product Segmentation")
 st.write("Upload a photo of a product (mug, Funko Pop, perfume) and run segmentation.")
 
-# Sidebar calibration
-st.sidebar.header("Calibration")
-px_per_cm_default = 10.0
-px_per_cm = st.sidebar.slider("Pixels per centimeter (px/cm)", min_value=1.0, max_value=200.0, value=px_per_cm_default)
-st.sidebar.markdown("Provide pixels-per-centimeter for your images. Measure a ruler in the image to compute this.")
+# We'll compute px_per_cm automatically from image metadata when possible.
+def _rational_to_float(r):
+    try:
+        if isinstance(r, tuple) and len(r) == 2:
+            return float(r[0]) / float(r[1]) if r[1] != 0 else float(r[0])
+        return float(r)
+    except Exception:
+        return None
+
+
+def get_px_per_cm(pil_img):
+    """Attempt to derive pixels-per-centimeter from image metadata (dpi or EXIF). Fallback to 96 DPI.
+
+    Returns px_per_cm (float).
+    """
+    # 1 inch = 2.54 cm
+    DEFAULT_DPI = 96.0
+    # check info['dpi'] first (PIL sets this for some formats)
+    try:
+        info = getattr(pil_img, 'info', {}) or {}
+        if 'dpi' in info:
+            dpi = info['dpi'][0]
+            if dpi and dpi > 0:
+                return dpi / 2.54
+    except Exception:
+        pass
+
+    # try EXIF tags for XResolution/YResolution and ResolutionUnit
+    try:
+        exif = pil_img._getexif() if hasattr(pil_img, '_getexif') else None
+        if exif:
+            # EXIF tag ids: 282 = XResolution, 283 = YResolution, 296 = ResolutionUnit
+            xres = exif.get(282) or exif.get(283)
+            unit = exif.get(296)
+            xval = _rational_to_float(xres) if xres is not None else None
+            if xval is not None and xval > 0:
+                # ResolutionUnit: 2 means inches, 3 means cm
+                if unit == 3:
+                    # xval is pixels per cm
+                    return xval
+                else:
+                    # assume inches
+                    return xval / 2.54
+    except Exception:
+        pass
+
+    # fallback to default dpi
+    return DEFAULT_DPI / 2.54
 
 def load_keras_model(path):
     if not tf_available:
@@ -186,54 +229,51 @@ def draw_bbox_on_image(image: Image, bbox, color=(255, 0, 0), thickness=3):
     return Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
 
 if uploaded is not None:
-    image = Image.open(uploaded)
-    st.image(image, caption='Uploaded image', use_column_width=True)
+    image = Image.open(uploaded).convert('RGB')
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("Run Segmentation"):
-            if (not tflite_loaded) and (keras_model is None):
-                st.error("No model loaded. Place a .tflite next to the app or ensure TensorFlow is available and H5 model is present.")
+    # Run segmentation immediately
+    if (not tflite_loaded) and (keras_model is None):
+        st.error("No model loaded. Place a .tflite next to the app or ensure TensorFlow is available and H5 model is present.")
+    else:
+        with st.spinner("Running segmentation..."):
+            img_arr, (orig_w, orig_h) = preprocess(image, IMAGE_SIZE)
+            # choose inference backend
+            if tflite_loaded and tflite_interp is not None:
+                mask = run_tflite_inference(tflite_interp, tflite_input_details, tflite_output_details, img_arr)
             else:
-                with st.spinner("Running model..."):
-                    img_arr, (orig_w, orig_h) = preprocess(image, IMAGE_SIZE)
-                    # choose inference backend
-                    if tflite_loaded and tflite_interp is not None:
-                        mask = run_tflite_inference(tflite_interp, tflite_input_details, tflite_output_details, img_arr)
-                    else:
-                        mask = run_keras_inference(keras_model, img_arr)
-                    # resize mask back to original image size
-                    mask_resized = cv2.resize(mask.astype(np.uint8), (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-                    bbox = mask_to_bounding_box(mask_resized)
-                    if bbox is None:
-                        st.warning("No object detected in the mask.")
-                    else:
-                        x, y, w, h = bbox
-                        # convert pixels -> cm -> inches
-                        width_cm = w / px_per_cm
-                        height_cm = h / px_per_cm
-                        width_in = width_cm / 2.54
-                        height_in = height_cm / 2.54
+                mask = run_keras_inference(keras_model, img_arr)
 
-                        st.success("Segmentation complete")
-                        st.write(f"Bounding box (pixels): x={x}, y={y}, w={w}, h={h}")
-                        st.write(f"Width: {width_cm:.2f} cm ({width_in:.2f} in)")
-                        st.write(f"Height: {height_cm:.2f} cm ({height_in:.2f} in)")
+            # resize mask back to original image size
+            mask_resized = cv2.resize(mask.astype(np.uint8), (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+            bbox = mask_to_bounding_box(mask_resized)
 
-                        # overlay
-                        bbox_image = draw_bbox_on_image(image.resize((orig_w, orig_h)), bbox)
-                        st.image(bbox_image, caption='Detected bounding box', use_column_width=True)
-
-    with col2:
-        st.header("Preview & Controls")
-        st.write("Calibration px/cm: ", px_per_cm)
-        st.write("Image size: {} x {}".format(*image.size))
-        if tflite_loaded:
-            st.write("Model (TFLite): {}".format(TFLITE_MODEL_PATH))
-        elif keras_model is not None:
-            st.write("Model (Keras .h5): {}".format(H5_MODEL_PATH))
+        if bbox is None:
+            st.warning("No object detected in the mask.")
+            st.image(image, caption='Uploaded image', use_column_width=True)
         else:
-            st.write("No model loaded")
+            x, y, w, h = bbox
+            # compute pixels-per-cm automatically from image metadata, then compute dimensions
+            px_per_cm = get_px_per_cm(image)
+            width_cm = w / px_per_cm
+            height_cm = h / px_per_cm
+            width_in = width_cm / 2.54
+            height_in = height_cm / 2.54
+
+            # draw bbox (green) on original image and show
+            bbox_image = draw_bbox_on_image(image, bbox, color=(0, 255, 0), thickness=4)
+
+            st.markdown("### Original Image")
+            st.image(bbox_image, use_column_width=False)
+
+            # show measurements in two columns similar to the example
+            mcol1, mcol2 = st.columns(2)
+            with mcol1:
+                st.metric(label="Width", value=f"{width_in:.2f} in", delta=f"{width_cm:.2f} cm")
+            with mcol2:
+                st.metric(label="Height", value=f"{height_in:.2f} in", delta=f"{height_cm:.2f} cm")
+
+            st.write(f"Bounding box (pixels): x={x}, y={y}, w={w}, h={h}")
+            st.success("Segmentation complete")
 
 else:
     st.info("Upload an image to get started.")
