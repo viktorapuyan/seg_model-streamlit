@@ -46,19 +46,24 @@ def load_keras_model(path):
 
 
 def load_tflite_interpreter(path):
+    # Return interpreter tuple or raise exception to be handled by caller
     if not os.path.exists(path):
-        return None
-    # prefer tflite-runtime Interpreter if available
-    if tflite_runtime_available:
-        interp = TFLiteInterpreter(model_path=path)
-    elif tf_available:
-        interp = tf.lite.Interpreter(model_path=path)
-    else:
-        return None
-    interp.allocate_tensors()
-    input_details = interp.get_input_details()
-    output_details = interp.get_output_details()
-    return interp, input_details, output_details
+        raise FileNotFoundError(f"TFLite model not found at {path}")
+    try:
+        # prefer tflite-runtime Interpreter if available
+        if tflite_runtime_available:
+            interp = TFLiteInterpreter(model_path=path)
+        elif tf_available:
+            interp = tf.lite.Interpreter(model_path=path)
+        else:
+            raise RuntimeError('No tflite runtime or TensorFlow available to load TFLite model')
+        interp.allocate_tensors()
+        input_details = interp.get_input_details()
+        output_details = interp.get_output_details()
+        return interp, input_details, output_details
+    except Exception as e:
+        # Re-raise so caller can report the reason
+        raise
 
 # Decide which model to use: prefer TFLite, fall back to H5 only if TF is available
 tflite_loaded = False
@@ -67,17 +72,47 @@ tflite_interp = None
 tflite_input_details = None
 tflite_output_details = None
 
-if os.path.exists(TFLITE_MODEL_PATH):
-    res = load_tflite_interpreter(TFLITE_MODEL_PATH)
-    if res is not None:
+# Allow uploading a .tflite model via the UI or search common locations
+st.sidebar.header("Model")
+uploaded_tflite = st.sidebar.file_uploader("Upload a .tflite model (optional)", type=["tflite"])
+candidate_paths = [TFLITE_MODEL_PATH, os.path.join(os.path.dirname(__file__), 'model.tflite'), os.path.join(os.path.dirname(__file__), '..', 'compressed_models', 'unet_best.dynamic.tflite')]
+
+if uploaded_tflite is not None:
+    # save uploaded model to the app directory so interpreter can load from filesystem
+    saved_path = os.path.join(os.path.dirname(__file__), os.path.basename(uploaded_tflite.name))
+    with open(saved_path, 'wb') as f:
+        f.write(uploaded_tflite.read())
+    candidate_paths.insert(0, saved_path)
+
+# find first loadable tflite and collect diagnostics
+load_errors = []
+for p in candidate_paths:
+    exists = os.path.exists(p)
+    if not exists:
+        load_errors.append((p, 'missing'))
+        continue
+    try:
+        res = load_tflite_interpreter(p)
         tflite_interp, tflite_input_details, tflite_output_details = res
         tflite_loaded = True
+        TFLITE_MODEL_PATH = p
+        load_errors.append((p, 'loaded'))
+        break
+    except Exception as e:
+        load_errors.append((p, f'error: {e}'))
 
 if not tflite_loaded:
     # try to load keras model if TF is available
     keras_model = load_keras_model(H5_MODEL_PATH)
     if keras_model is None and not tf_available:
-        st.warning('Neither TFLite nor TensorFlow are available; please provide a TFLite model or enable TensorFlow in your environment.')
+        st.warning('Neither TFLite model nor TensorFlow are available; upload a .tflite model or enable TensorFlow in your environment.')
+
+# Show diagnostic summary of candidate model paths in sidebar
+st.sidebar.markdown("**Model load diagnostics**")
+for p, status in load_errors:
+    st.sidebar.text(f"{p} -> {status}")
+if uploaded_tflite is not None:
+    st.sidebar.success(f"Uploaded model saved to: {saved_path}")
 
 uploaded = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
